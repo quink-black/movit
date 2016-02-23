@@ -275,6 +275,7 @@ template<class T>
 void extract_uniform_declarations(const vector<Uniform<T> > &effect_uniforms,
                                   const string &type_specifier,
                                   const string &effect_id,
+                                  bool in_ubo_block,
                                   vector<Uniform<T> > *phase_uniforms,
                                   string *glsl_string)
 {
@@ -282,8 +283,10 @@ void extract_uniform_declarations(const vector<Uniform<T> > &effect_uniforms,
 		phase_uniforms->push_back(effect_uniforms[i]);
 		phase_uniforms->back().prefix = effect_id;
 
-		*glsl_string += string("uniform ") + type_specifier + " " + effect_id
-			+ "_" + effect_uniforms[i].name + ";\n";
+		if (!in_ubo_block) {
+			*glsl_string += "uniform ";
+		}
+		*glsl_string += type_specifier + " " + effect_id + "_" + effect_uniforms[i].name + ";\n";
 	}
 }
 
@@ -291,6 +294,7 @@ template<class T>
 void extract_uniform_array_declarations(const vector<Uniform<T> > &effect_uniforms,
                                         const string &type_specifier,
                                         const string &effect_id,
+                                        bool in_ubo_block,
                                         vector<Uniform<T> > *phase_uniforms,
                                         string *glsl_string)
 {
@@ -298,8 +302,12 @@ void extract_uniform_array_declarations(const vector<Uniform<T> > &effect_unifor
 		phase_uniforms->push_back(effect_uniforms[i]);
 		phase_uniforms->back().prefix = effect_id;
 
+		if (!in_ubo_block) {
+			*glsl_string += "uniform ";
+		}
+
 		char buf[256];
-		snprintf(buf, sizeof(buf), "uniform %s %s_%s[%d];\n",
+		snprintf(buf, sizeof(buf), "%s %s_%s[%d];\n",
 			type_specifier.c_str(), effect_id.c_str(),
 			effect_uniforms[i].name.c_str(),
 			int(effect_uniforms[i].num_values));
@@ -313,6 +321,7 @@ void collect_uniform_locations(GLuint glsl_program_num, vector<Uniform<T> > *pha
 	for (unsigned i = 0; i < phase_uniforms->size(); ++i) {
 		Uniform<T> &uniform = (*phase_uniforms)[i];
 		uniform.location = get_uniform_location(glsl_program_num, uniform.prefix, uniform.name);
+		get_uniform_offset_and_size(glsl_program_num, uniform.prefix, uniform.name, &uniform.ubo_offset, &uniform.ubo_num_elem);
 	}
 }
 
@@ -422,24 +431,34 @@ void EffectChain::compile_glsl_program(Phase *phase)
 	// before in the output source, since output_fragment_shader() is allowed
 	// to register new uniforms (e.g. arrays that are of unknown length until
 	// finalization time).
-	// TODO: Make a uniform block for platforms that support it.
 	string frag_shader_uniforms = "";
+	for (unsigned i = 0; i < phase->effects.size(); ++i) {
+		const bool in_ubo_block = true;  // TODO: Check for the extension.
+		Node *node = phase->effects[i];
+		Effect *effect = node->effect;
+		const string effect_id = phase->effect_ids[node];
+		extract_uniform_declarations(effect->uniforms_bool, "bool", effect_id, in_ubo_block, &phase->uniforms_bool, &frag_shader_uniforms);
+		extract_uniform_declarations(effect->uniforms_int, "int", effect_id, in_ubo_block, &phase->uniforms_int, &frag_shader_uniforms);
+		extract_uniform_declarations(effect->uniforms_float, "float", effect_id, in_ubo_block, &phase->uniforms_float, &frag_shader_uniforms);
+		extract_uniform_declarations(effect->uniforms_vec2, "vec2", effect_id, in_ubo_block, &phase->uniforms_vec2, &frag_shader_uniforms);
+		extract_uniform_declarations(effect->uniforms_vec3, "vec3", effect_id, in_ubo_block, &phase->uniforms_vec3, &frag_shader_uniforms);
+		extract_uniform_declarations(effect->uniforms_vec4, "vec4", effect_id, in_ubo_block, &phase->uniforms_vec4, &frag_shader_uniforms);
+		extract_uniform_array_declarations(effect->uniforms_float_array, "float", effect_id, in_ubo_block, &phase->uniforms_float, &frag_shader_uniforms);
+		extract_uniform_array_declarations(effect->uniforms_vec2_array, "vec2", effect_id, in_ubo_block, &phase->uniforms_vec2, &frag_shader_uniforms);
+		extract_uniform_array_declarations(effect->uniforms_vec3_array, "vec3", effect_id, in_ubo_block, &phase->uniforms_vec3, &frag_shader_uniforms);
+		extract_uniform_array_declarations(effect->uniforms_vec4_array, "vec4", effect_id, in_ubo_block, &phase->uniforms_vec4, &frag_shader_uniforms);
+		extract_uniform_declarations(effect->uniforms_mat3, "mat3", effect_id, in_ubo_block, &phase->uniforms_mat3, &frag_shader_uniforms);
+	}
+	if (!frag_shader_uniforms.empty()) {
+		frag_shader_uniforms = "layout(packed) uniform MovitUniforms {\n" + frag_shader_uniforms + "};\n";
+	}
+
+	// Samplers must be outside the UBO block.
 	for (unsigned i = 0; i < phase->effects.size(); ++i) {
 		Node *node = phase->effects[i];
 		Effect *effect = node->effect;
 		const string effect_id = phase->effect_ids[node];
-		extract_uniform_declarations(effect->uniforms_sampler2d, "sampler2D", effect_id, &phase->uniforms_sampler2d, &frag_shader_uniforms);
-		extract_uniform_declarations(effect->uniforms_bool, "bool", effect_id, &phase->uniforms_bool, &frag_shader_uniforms);
-		extract_uniform_declarations(effect->uniforms_int, "int", effect_id, &phase->uniforms_int, &frag_shader_uniforms);
-		extract_uniform_declarations(effect->uniforms_float, "float", effect_id, &phase->uniforms_float, &frag_shader_uniforms);
-		extract_uniform_declarations(effect->uniforms_vec2, "vec2", effect_id, &phase->uniforms_vec2, &frag_shader_uniforms);
-		extract_uniform_declarations(effect->uniforms_vec3, "vec3", effect_id, &phase->uniforms_vec3, &frag_shader_uniforms);
-		extract_uniform_declarations(effect->uniforms_vec4, "vec4", effect_id, &phase->uniforms_vec4, &frag_shader_uniforms);
-		extract_uniform_array_declarations(effect->uniforms_float_array, "float", effect_id, &phase->uniforms_float, &frag_shader_uniforms);
-		extract_uniform_array_declarations(effect->uniforms_vec2_array, "vec2", effect_id, &phase->uniforms_vec2, &frag_shader_uniforms);
-		extract_uniform_array_declarations(effect->uniforms_vec3_array, "vec3", effect_id, &phase->uniforms_vec3, &frag_shader_uniforms);
-		extract_uniform_array_declarations(effect->uniforms_vec4_array, "vec4", effect_id, &phase->uniforms_vec4, &frag_shader_uniforms);
-		extract_uniform_declarations(effect->uniforms_mat3, "mat3", effect_id, &phase->uniforms_mat3, &frag_shader_uniforms);
+		extract_uniform_declarations(effect->uniforms_sampler2d, "sampler2D", effect_id, /*in_ubo_block=*/false, &phase->uniforms_sampler2d, &frag_shader_uniforms);
 	}
 
 	frag_shader = frag_shader_header + frag_shader_uniforms + frag_shader;
@@ -466,6 +485,34 @@ void EffectChain::compile_glsl_program(Phase *phase)
 		phase->attribute_indexes.insert(texcoord_attribute_index);
 	}
 
+	// Create an UBO for holding the uniforms. This UBO will be updated each frame.
+	// TODO: Delete the block on destruction.
+	phase->uniform_block_index = glGetUniformBlockIndex(phase->glsl_program_num, "MovitUniforms");
+	if (phase->uniform_block_index != GL_INVALID_INDEX) {
+		glGenBuffers(1, &phase->ubo);
+		check_error();
+		GLsizei block_size;
+		glGetActiveUniformBlockiv(
+			phase->glsl_program_num, phase->uniform_block_index,
+			GL_UNIFORM_BLOCK_DATA_SIZE, &block_size);
+		check_error();
+		phase->ubo_data.resize(block_size);
+
+		glBindBuffer(GL_UNIFORM_BUFFER, phase->ubo);
+		check_error();
+		glBufferData(GL_UNIFORM_BUFFER, block_size, NULL, GL_DYNAMIC_DRAW);
+		check_error();
+
+		// Associate the uniform block with binding point 0,
+		// and attach the UBO to that binding point.
+		glUniformBlockBinding(phase->glsl_program_num, phase->uniform_block_index, 0);
+		check_error();
+		glBindBufferBase(GL_UNIFORM_BUFFER, 0, phase->ubo);
+		check_error();
+	} else {
+		phase->ubo = GL_INVALID_INDEX;
+	}
+
 	// Collect the resulting location numbers for each uniform.
 	collect_uniform_locations(phase->glsl_program_num, &phase->uniforms_sampler2d);
 	collect_uniform_locations(phase->glsl_program_num, &phase->uniforms_bool);
@@ -475,6 +522,9 @@ void EffectChain::compile_glsl_program(Phase *phase)
 	collect_uniform_locations(phase->glsl_program_num, &phase->uniforms_vec3);
 	collect_uniform_locations(phase->glsl_program_num, &phase->uniforms_vec4);
 	collect_uniform_locations(phase->glsl_program_num, &phase->uniforms_mat3);
+
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+	check_error();
 }
 
 // Construct GLSL programs, starting at the given effect and following
@@ -1946,54 +1996,75 @@ void EffectChain::execute_phase(Phase *phase, bool last_phase,
 
 void EffectChain::setup_uniforms(Phase *phase)
 {
-	// TODO: Use UBO blocks.
+	char *ubo_data = phase->ubo_data.empty() ? NULL : &phase->ubo_data[0];
+
 	for (size_t i = 0; i < phase->uniforms_sampler2d.size(); ++i) {
 		const Uniform<int> &uniform = phase->uniforms_sampler2d[i];
-		if (uniform.location != -1) {
+		if (uniform.location != GL_INVALID_INDEX) {
 			glUniform1iv(uniform.location, uniform.num_values, uniform.value);
 		}
+		assert(uniform.ubo_offset == -1);  // Samplers don't go into UBOs.
 	}
 	for (size_t i = 0; i < phase->uniforms_bool.size(); ++i) {
 		const Uniform<bool> &uniform = phase->uniforms_bool[i];
 		assert(uniform.num_values == 1);
-		if (uniform.location != -1) {
+		if (uniform.location != GL_INVALID_INDEX) {
 			glUniform1i(uniform.location, *uniform.value);
+		}
+		if (uniform.ubo_offset != -1) {
+			GLint int_val = *uniform.value;
+			memcpy(ubo_data + uniform.ubo_offset, &int_val, sizeof(int_val));
 		}
 	}
 	for (size_t i = 0; i < phase->uniforms_int.size(); ++i) {
 		const Uniform<int> &uniform = phase->uniforms_int[i];
-		if (uniform.location != -1) {
+		if (uniform.location != GL_INVALID_INDEX) {
 			glUniform1iv(uniform.location, uniform.num_values, uniform.value);
+		}
+		if (uniform.ubo_offset != -1) {
+			memcpy(ubo_data + uniform.ubo_offset, uniform.value, uniform.ubo_num_elem * sizeof(*uniform.value));
 		}
 	}
 	for (size_t i = 0; i < phase->uniforms_float.size(); ++i) {
 		const Uniform<float> &uniform = phase->uniforms_float[i];
-		if (uniform.location != -1) {
+		if (uniform.location != GL_INVALID_INDEX) {
 			glUniform1fv(uniform.location, uniform.num_values, uniform.value);
+		}
+		if (uniform.ubo_offset != -1) {
+			memcpy(ubo_data + uniform.ubo_offset, uniform.value, uniform.ubo_num_elem * sizeof(*uniform.value));
 		}
 	}
 	for (size_t i = 0; i < phase->uniforms_vec2.size(); ++i) {
 		const Uniform<float> &uniform = phase->uniforms_vec2[i];
-		if (uniform.location != -1) {
-			glUniform2fv(uniform.location, uniform.num_values, uniform.value);
+		if (uniform.location != GL_INVALID_INDEX) {
+			glUniform2fv(uniform.location, uniform.ubo_num_elem, uniform.value);
+		}
+		if (uniform.ubo_offset != -1) {
+			memcpy(ubo_data + uniform.ubo_offset, uniform.value, uniform.ubo_num_elem * 2 * sizeof(*uniform.value));
 		}
 	}
 	for (size_t i = 0; i < phase->uniforms_vec3.size(); ++i) {
 		const Uniform<float> &uniform = phase->uniforms_vec3[i];
-		if (uniform.location != -1) {
-			glUniform3fv(uniform.location, uniform.num_values, uniform.value);
+		if (uniform.location != GL_INVALID_INDEX) {
+			glUniform3fv(uniform.location, uniform.ubo_num_elem, uniform.value);
+		}
+		if (uniform.ubo_offset != -1) {
+			memcpy(ubo_data + uniform.ubo_offset, uniform.value, uniform.ubo_num_elem * 3 * sizeof(*uniform.value));
 		}
 	}
 	for (size_t i = 0; i < phase->uniforms_vec4.size(); ++i) {
 		const Uniform<float> &uniform = phase->uniforms_vec4[i];
-		if (uniform.location != -1) {
-			glUniform4fv(uniform.location, uniform.num_values, uniform.value);
+		if (uniform.location != GL_INVALID_INDEX) {
+			glUniform4fv(uniform.location, uniform.ubo_num_elem, uniform.value);
+		}
+		if (uniform.ubo_offset != -1) {
+			memcpy(ubo_data + uniform.ubo_offset, uniform.value, uniform.ubo_num_elem * 4 * sizeof(*uniform.value));
 		}
 	}
 	for (size_t i = 0; i < phase->uniforms_mat3.size(); ++i) {
 		const Uniform<Matrix3d> &uniform = phase->uniforms_mat3[i];
-		assert(uniform.num_values == 1);
-		if (uniform.location != -1) {
+		assert(uniform.ubo_num_elem == 1);
+		if (uniform.location != GL_INVALID_INDEX) {
 			// Convert to float (GLSL has no double matrices).
 		        float matrixf[9];
 			for (unsigned y = 0; y < 3; ++y) {
@@ -2003,6 +2074,16 @@ void EffectChain::setup_uniforms(Phase *phase)
 			}
 			glUniformMatrix3fv(uniform.location, 1, GL_FALSE, matrixf);
 		}
+		if (uniform.ubo_offset != -1) {
+			// TODO
+			assert(false);
+		}
+	}
+
+	if (phase->ubo != GL_INVALID_INDEX) {
+		// TODO: Do we want to demand DSA for this?
+		glNamedBufferSubData(phase->ubo, 0, phase->ubo_data.size(), ubo_data);
+		return;
 	}
 }
 

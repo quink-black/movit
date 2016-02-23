@@ -14,6 +14,24 @@ GLint get_uniform_location(GLuint glsl_program_num, const string &prefix, const 
 	return glGetUniformLocation(glsl_program_num, name.c_str());
 }
 
+void get_uniform_offset_and_size(GLuint glsl_program_num, const string &prefix, const string &key, GLint *offset, GLint *size)
+{
+	string name = prefix + "_" + key;
+	GLuint index;
+	const GLchar *name_cstr = name.c_str();
+	glGetUniformIndices(glsl_program_num, 1, &name_cstr, &index);
+	check_error();
+	if (index == GL_INVALID_INDEX) {
+		*offset = -1;
+		*size = 0;
+		return;
+	}
+	glGetActiveUniformsiv(glsl_program_num, 1, &index, GL_UNIFORM_OFFSET, offset);
+	check_error();
+	glGetActiveUniformsiv(glsl_program_num, 1, &index, GL_UNIFORM_SIZE, size);
+	check_error();
+}
+
 void set_uniform_int(GLuint glsl_program_num, const string &prefix, const string &key, int value)
 {
 	GLint location = get_uniform_location(glsl_program_num, prefix, key);

@@ -59,7 +59,9 @@ struct Uniform {
 	const T *value;  // Owner by the effect.
 	size_t num_values;  // Number of elements; for arrays only. _Not_ the vector length.
 	std::string prefix;  // Filled in only after phases have been constructed.
-	GLint location;  // Filled in only after phases have been constructed. -1 if no location.
+	GLuint location;  // Filled in only after phases have been constructed. GL_INVALID_INDEX if no location, or if using UBOs.
+	GLint ubo_offset;  // Same. -1 if no location or if not using UBOs.
+	GLint ubo_num_elem; // Same. 0 if no location or if not using UBOs.
 };
 
 class Effect {

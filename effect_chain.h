@@ -179,6 +179,10 @@ struct Phase {
 	std::vector<Uniform<float> > uniforms_vec4;
 	std::vector<Uniform<Eigen::Matrix3d> > uniforms_mat3;
 
+	GLuint ubo;  // GL_INVALID_INDEX if not using UBOs.
+	GLuint uniform_block_index;
+	std::vector<char> ubo_data;
+
 	// For measurement of GPU time used.
 	std::list<GLuint> timer_query_objects_running;
 	std::list<GLuint> timer_query_objects_free;
