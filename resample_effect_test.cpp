@@ -36,7 +36,16 @@ float lanczos(float x, float a)
 
 }  // namespace
 
-TEST(ResampleEffectTest, IdentityTransformDoesNothing) {
+class ResampleEffectTest : public testing::TestWithParam<string> {
+protected:
+	ResampleEffectTest() : disabler(GetParam() == "fragment") {}
+	bool should_skip() { return disabler.should_skip(); }
+
+private:
+	DisableComputeShadersTemporarily disabler;
+};
+
+TEST_P(ResampleEffectTest, IdentityTransformDoesNothing) {
 	const int size = 4;
 
 	float data[size * size] = {
@@ -56,7 +65,7 @@ TEST(ResampleEffectTest, IdentityTransformDoesNothing) {
 	expect_equal(data, out_data, size, size);
 }
 
-TEST(ResampleEffectTest, UpscaleByTwoGetsCorrectPixelCenters) {
+TEST_P(ResampleEffectTest, UpscaleByTwoGetsCorrectPixelCenters) {
 	const int size = 5;
 
 	float data[size * size] = {
@@ -94,7 +103,7 @@ TEST(ResampleEffectTest, UpscaleByTwoGetsCorrectPixelCenters) {
 	expect_equal(expected_data, out_data, size * 2, size * 2);
 }
 
-TEST(ResampleEffectTest, DownscaleByTwoGetsCorrectPixelCenters) {
+TEST_P(ResampleEffectTest, DownscaleByTwoGetsCorrectPixelCenters) {
 	const int size = 5;
 
 	// This isn't a perfect dot, since the Lanczos filter has a slight
@@ -136,7 +145,7 @@ TEST(ResampleEffectTest, DownscaleByTwoGetsCorrectPixelCenters) {
 	expect_equal(expected_data, out_data, size, size);
 }
 
-TEST(ResampleEffectTest, UpscaleByThreeGetsCorrectPixelCenters) {
+TEST_P(ResampleEffectTest, UpscaleByThreeGetsCorrectPixelCenters) {
 	const int size = 5;
 
 	float data[size * size] = {
@@ -179,7 +188,7 @@ TEST(ResampleEffectTest, UpscaleByThreeGetsCorrectPixelCenters) {
 	}
 }
 
-TEST(ResampleEffectTest, HeavyResampleGetsSumRight) {
+TEST_P(ResampleEffectTest, HeavyResampleGetsSumRight) {
 	// Do only one resample pass, more specifically the last one, which goes to
 	// our fp32 output. This allows us to analyze the precision without intermediate
 	// fp16 rounding.
@@ -219,7 +228,7 @@ TEST(ResampleEffectTest, HeavyResampleGetsSumRight) {
 	expect_equal(expected_data, out_data, dwidth, dheight, 0.12 / 1023.0);
 }
 
-TEST(ResampleEffectTest, ReadWholePixelFromLeft) {
+TEST_P(ResampleEffectTest, ReadWholePixelFromLeft) {
 	const int size = 5;
 
 	float data[size * size] = {
@@ -248,7 +257,7 @@ TEST(ResampleEffectTest, ReadWholePixelFromLeft) {
 	expect_equal(expected_data, out_data, size, size);
 }
 
-TEST(ResampleEffectTest, ReadQuarterPixelFromLeft) {
+TEST_P(ResampleEffectTest, ReadQuarterPixelFromLeft) {
 	const int size = 5;
 
 	float data[size * size] = {
@@ -283,7 +292,7 @@ TEST(ResampleEffectTest, ReadQuarterPixelFromLeft) {
 	expect_equal(expected_data, out_data, size, size);
 }
 
-TEST(ResampleEffectTest, ReadQuarterPixelFromTop) {
+TEST_P(ResampleEffectTest, ReadQuarterPixelFromTop) {
 	const int width = 3;
 	const int height = 5;
 
@@ -315,7 +324,7 @@ TEST(ResampleEffectTest, ReadQuarterPixelFromTop) {
 	expect_equal(expected_data, out_data, width, height);
 }
 
-TEST(ResampleEffectTest, ReadHalfPixelFromLeftAndScale) {
+TEST_P(ResampleEffectTest, ReadHalfPixelFromLeftAndScale) {
 	const int src_width = 4;
 	const int dst_width = 8;
 
@@ -352,7 +361,7 @@ TEST(ResampleEffectTest, ReadHalfPixelFromLeftAndScale) {
 	expect_equal(expected_data, out_data, dst_width, 1, 1.5f / 255.0f, 0.4f / 255.0f);
 }
 
-TEST(ResampleEffectTest, Zoom) {
+TEST_P(ResampleEffectTest, Zoom) {
 	const int width = 5;
 	const int height = 3;
 
@@ -378,7 +387,7 @@ TEST(ResampleEffectTest, Zoom) {
 	expect_equal(expected_data, out_data, width, height);
 }
 
-TEST(ResampleEffectTest, VerticalZoomFromTop) {
+TEST_P(ResampleEffectTest, VerticalZoomFromTop) {
 	const int width = 5;
 	const int height = 5;
 
@@ -412,7 +421,7 @@ TEST(ResampleEffectTest, VerticalZoomFromTop) {
 	expect_equal(expected_data, out_data, width, height);
 }
 
-TEST(ResampleEffectTest, Precision) {
+TEST_P(ResampleEffectTest, Precision) {
 	const int size = 1920;  // Difficult non-power-of-two size.
 	const int offset = 5;
 
@@ -435,6 +444,10 @@ TEST(ResampleEffectTest, Precision) {
 
 	expect_equal(expected_data, out_data, size, 1);
 }
+
+INSTANTIATE_TEST_CASE_P(ResampleEffectTest,
+                        ResampleEffectTest,
+                        testing::Values("fragment", "compute"));
 
 #ifdef HAVE_BENCHMARK
 template<> inline uint8_t from_fp32<uint8_t>(float x) { return lrintf(x * 255.0f); }
@@ -479,6 +492,10 @@ BENCHMARK_CAPTURE(BM_ResampleEffectInt8, Int8Upscale, GAMMA_REC_709, "fragment")
 BENCHMARK_CAPTURE(BM_ResampleEffectHalf, Float16Upscale, GAMMA_LINEAR, "fragment")->Args({640, 360, 1280, 720})->Args({320, 180, 1280, 720})->Args({321, 181, 1280, 720})->UseRealTime()->Unit(benchmark::kMicrosecond);
 BENCHMARK_CAPTURE(BM_ResampleEffectInt8, Int8Downscale, GAMMA_REC_709, "fragment")->Args({1280, 720, 640, 360})->Args({1280, 720, 320, 180})->Args({1280, 720, 321, 181})->UseRealTime()->Unit(benchmark::kMicrosecond);
 BENCHMARK_CAPTURE(BM_ResampleEffectHalf, Float16Downscale, GAMMA_LINEAR, "fragment")->Args({1280, 720, 640, 360})->Args({1280, 720, 320, 180})->Args({1280, 720, 321, 181})->UseRealTime()->Unit(benchmark::kMicrosecond);
+BENCHMARK_CAPTURE(BM_ResampleEffectInt8, Int8UpscaleCompute, GAMMA_REC_709, "compute")->Args({640, 360, 1280, 720})->Args({320, 180, 1280, 720})->Args({321, 181, 1280, 720})->UseRealTime()->Unit(benchmark::kMicrosecond);
+BENCHMARK_CAPTURE(BM_ResampleEffectHalf, Float16UpscaleCompute, GAMMA_LINEAR, "compute")->Args({640, 360, 1280, 720})->Args({320, 180, 1280, 720})->Args({321, 181, 1280, 720})->UseRealTime()->Unit(benchmark::kMicrosecond);
+BENCHMARK_CAPTURE(BM_ResampleEffectInt8, Int8DownscaleCompute, GAMMA_REC_709, "compute")->Args({1280, 720, 640, 360})->Args({1280, 720, 320, 180})->Args({1280, 720, 321, 181})->UseRealTime()->Unit(benchmark::kMicrosecond);
+BENCHMARK_CAPTURE(BM_ResampleEffectHalf, Float16DownscaleCompute, GAMMA_LINEAR, "compute")->Args({1280, 720, 640, 360})->Args({1280, 720, 320, 180})->Args({1280, 720, 321, 181})->UseRealTime()->Unit(benchmark::kMicrosecond);
 
 void BM_ComputeBilinearScalingWeights(benchmark::State &state)
 {
@@ -488,15 +505,47 @@ void BM_ComputeBilinearScalingWeights(benchmark::State &state)
 	movit_texel_subpixel_precision = 64;  // To get consistent results across GPUs; this is a CPU test.
 
 	// One iteration warmup to make sure the Lanczos table is computed.
-	calculate_bilinear_scaling_weights(src_size, dst_size, 0.999f, 0.0f);
+	calculate_bilinear_scaling_weights(src_size, dst_size, 0.999f, 0.0f, BilinearFormatConstraints::ALLOW_FP16_AND_FP32);
 
 	for (auto _ : state) {
-		ScalingWeights weights = calculate_bilinear_scaling_weights(src_size, dst_size, 0.999f, 0.0f);
+		ScalingWeights weights = calculate_bilinear_scaling_weights(src_size, dst_size, 0.999f, 0.0f, BilinearFormatConstraints::ALLOW_FP16_AND_FP32);
 	}
 
 	movit_texel_subpixel_precision = old_precision;
 }
 BENCHMARK(BM_ComputeBilinearScalingWeights)->Unit(benchmark::kMicrosecond);
+
+void BM_ComputeBilinearScalingWeightsNoFP16(benchmark::State &state)
+{
+	constexpr unsigned src_size = 1280;
+	constexpr unsigned dst_size = 35;
+	int old_precision = movit_texel_subpixel_precision;
+	movit_texel_subpixel_precision = 64;  // To get consistent results across GPUs; this is a CPU test.
+
+	// One iteration warmup to make sure the Lanczos table is computed.
+	calculate_bilinear_scaling_weights(src_size, dst_size, 0.999f, 0.0f, BilinearFormatConstraints::ALLOW_FP32_ONLY);
+
+	for (auto _ : state) {
+		ScalingWeights weights = calculate_bilinear_scaling_weights(src_size, dst_size, 0.999f, 0.0f, BilinearFormatConstraints::ALLOW_FP32_ONLY);
+	}
+
+	movit_texel_subpixel_precision = old_precision;
+}
+BENCHMARK(BM_ComputeBilinearScalingWeightsNoFP16)->Unit(benchmark::kMicrosecond);
+
+void BM_ComputeRawScalingWeights(benchmark::State &state)
+{
+	constexpr unsigned src_size = 1280;
+	constexpr unsigned dst_size = 35;
+
+	// One iteration warmup to make sure the Lanczos table is computed.
+	calculate_raw_scaling_weights(src_size, dst_size, 0.999f, 0.0f);
+
+	for (auto _ : state) {
+		ScalingWeights weights = calculate_raw_scaling_weights(src_size, dst_size, 0.999f, 0.0f);
+	}
+}
+BENCHMARK(BM_ComputeRawScalingWeights)->Unit(benchmark::kMicrosecond);
 
 #endif
 

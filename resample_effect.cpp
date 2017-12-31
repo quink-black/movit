@@ -197,6 +197,21 @@ void normalize_sum(Tap<T>* vals, unsigned num)
 	}
 }
 
+template<class T>
+void normalize_sum(T* vals, unsigned num)
+{
+	for (int normalize_pass = 0; normalize_pass < 2; ++normalize_pass) {
+		float sum = 0.0;
+		for (unsigned i = 0; i < num; ++i) {
+			sum += to_fp32(vals[i]);
+		}
+		float inv_sum = 1.0 / sum;
+		for (unsigned i = 0; i < num; ++i) {
+			vals[i] = from_fp32<T>(to_fp32(vals[i]) * inv_sum);
+		}
+	}
+}
+
 // Make use of the bilinear filtering in the GPU to reduce the number of samples
 // we need to make. This is a bit more complex than BlurEffect since we cannot combine
 // two neighboring samples if their weights have differing signs, so we first need to
@@ -309,13 +324,19 @@ ResampleEffect::ResampleEffect()
 	register_int("width", &output_width);
 	register_int("height", &output_height);
 
-	// The first blur pass will forward resolution information to us.
-	hpass_owner.reset(new SingleResamplePassEffect(this));
-	hpass = hpass_owner.get();
-	CHECK(hpass->set_int("direction", SingleResamplePassEffect::HORIZONTAL));
-	vpass_owner.reset(new SingleResamplePassEffect(this));
-	vpass = vpass_owner.get();
-	CHECK(vpass->set_int("direction", SingleResamplePassEffect::VERTICAL));
+	if (movit_compute_shaders_supported) {
+		// The effect will forward resolution information to us.
+		compute_effect_owner.reset(new ResampleComputeEffect(this));
+		compute_effect = compute_effect_owner.get();
+	} else {
+		// The first blur pass will forward resolution information to us.
+		hpass_owner.reset(new SingleResamplePassEffect(this));
+		hpass = hpass_owner.get();
+		CHECK(hpass->set_int("direction", SingleResamplePassEffect::HORIZONTAL));
+		vpass_owner.reset(new SingleResamplePassEffect(this));
+		vpass = vpass_owner.get();
+		CHECK(vpass->set_int("direction", SingleResamplePassEffect::VERTICAL));
+	}
 
 	update_size();
 }
@@ -326,11 +347,17 @@ ResampleEffect::~ResampleEffect()
 
 void ResampleEffect::rewrite_graph(EffectChain *graph, Node *self)
 {
-	Node *hpass_node = graph->add_node(hpass_owner.release());
-	Node *vpass_node = graph->add_node(vpass_owner.release());
-	graph->connect_nodes(hpass_node, vpass_node);
-	graph->replace_receiver(self, hpass_node);
-	graph->replace_sender(self, vpass_node);
+	if (compute_effect != nullptr) {
+		Node *compute_node = graph->add_node(compute_effect_owner.release());
+		graph->replace_receiver(self, compute_node);
+		graph->replace_sender(self, compute_node);
+	} else {
+		Node *hpass_node = graph->add_node(hpass_owner.release());
+		Node *vpass_node = graph->add_node(vpass_owner.release());
+		graph->connect_nodes(hpass_node, vpass_node);
+		graph->replace_receiver(self, hpass_node);
+		graph->replace_sender(self, vpass_node);
+	}
 	self->disabled = true;
 } 
 
@@ -349,16 +376,22 @@ void ResampleEffect::inform_input_size(unsigned input_num, unsigned width, unsig
 void ResampleEffect::update_size()
 {
 	bool ok = true;
-	ok |= hpass->set_int("input_width", input_width);
-	ok |= hpass->set_int("input_height", input_height);
-	ok |= hpass->set_int("output_width", output_width);
-	ok |= hpass->set_int("output_height", input_height);
+	if (compute_effect != nullptr) {
+		ok |= compute_effect->set_int("input_width", input_width);
+		ok |= compute_effect->set_int("input_height", input_height);
+		ok |= compute_effect->set_int("output_width", output_width);
+		ok |= compute_effect->set_int("output_height", output_height);
+	} else {
+		ok |= hpass->set_int("input_width", input_width);
+		ok |= hpass->set_int("input_height", input_height);
+		ok |= hpass->set_int("output_width", output_width);
+		ok |= hpass->set_int("output_height", input_height);
 
-	ok |= vpass->set_int("input_width", output_width);
-	ok |= vpass->set_int("input_height", input_height);
-	ok |= vpass->set_int("output_width", output_width);
-	ok |= vpass->set_int("output_height", output_height);
-
+		ok |= vpass->set_int("input_width", output_width);
+		ok |= vpass->set_int("input_height", input_height);
+		ok |= vpass->set_int("output_width", output_width);
+		ok |= vpass->set_int("output_height", output_height);
+	}
 	assert(ok);
 
 	// The offset added due to zoom may have changed with the size.
@@ -374,10 +407,17 @@ void ResampleEffect::update_offset_and_zoom()
 	float extra_offset_x = zoom_center_x * (1.0f - 1.0f / zoom_x) * input_width;
 	float extra_offset_y = (1.0f - zoom_center_y) * (1.0f - 1.0f / zoom_y) * input_height;
 
-	ok |= hpass->set_float("offset", extra_offset_x + offset_x);
-	ok |= vpass->set_float("offset", extra_offset_y - offset_y);  // Compensate for the bottom-left origin.
-	ok |= hpass->set_float("zoom", zoom_x);
-	ok |= vpass->set_float("zoom", zoom_y);
+	if (compute_effect != nullptr) {
+		ok |= compute_effect->set_float("offset_x", extra_offset_x + offset_x);
+		ok |= compute_effect->set_float("offset_y", extra_offset_y - offset_y);  // Compensate for the bottom-left origin.
+		ok |= compute_effect->set_float("zoom_x", zoom_x);
+		ok |= compute_effect->set_float("zoom_y", zoom_y);
+	} else {
+		ok |= hpass->set_float("offset", extra_offset_x + offset_x);
+		ok |= vpass->set_float("offset", extra_offset_y - offset_y);  // Compensate for the bottom-left origin.
+		ok |= hpass->set_float("zoom", zoom_x);
+		ok |= vpass->set_float("zoom", zoom_y);
+	}
 
 	assert(ok);
 }
@@ -502,7 +542,7 @@ void SingleResamplePassEffect::update_texture(GLuint glsl_program_num, const str
 		assert(false);
 	}
 
-	ScalingWeights weights = calculate_bilinear_scaling_weights(src_size, dst_size, zoom, offset);
+	ScalingWeights weights = calculate_bilinear_scaling_weights(src_size, dst_size, zoom, offset, BilinearFormatConstraints::ALLOW_FP16_AND_FP32);
 	src_bilinear_samples = weights.src_bilinear_samples;
 	num_loops = weights.num_loops;
 	slice_height = 1.0f / weights.num_loops;
@@ -527,6 +567,106 @@ void SingleResamplePassEffect::update_texture(GLuint glsl_program_num, const str
 	}
 
 	tex.update(weights.src_bilinear_samples, weights.dst_samples, internal_format, GL_RG, type, pixels);
+}
+
+ResampleComputeEffect::ResampleComputeEffect(ResampleEffect *parent)
+	: parent(parent),
+	  input_width(1280),
+	  input_height(720),
+	  offset_x(0.0),
+	  offset_y(0.0),
+	  zoom_x(1.0),
+	  zoom_y(1.0),
+	  last_input_width(-1),
+	  last_input_height(-1),
+	  last_output_width(-1),
+	  last_output_height(-1),
+	  last_offset_x(0.0 / 0.0),  // NaN.
+	  last_offset_y(0.0 / 0.0),  // NaN.
+	  last_zoom_x(0.0 / 0.0),  // NaN.
+	  last_zoom_y(0.0 / 0.0)  // NaN.
+{
+	register_int("input_width", &input_width);
+	register_int("input_height", &input_height);
+	register_int("output_width", &output_width);
+	register_int("output_height", &output_height);
+	register_float("offset_x", &offset_x);
+	register_float("offset_y", &offset_y);
+	register_float("zoom_x", &zoom_x);
+	register_float("zoom_y", &zoom_y);
+	register_uniform_sampler2d("sample_tex_horizontal", &uniform_sample_tex_horizontal);
+	register_uniform_sampler2d("sample_tex_vertical", &uniform_sample_tex_vertical);
+	register_uniform_int("num_horizontal_samples", &uniform_num_horizontal_samples);
+	register_uniform_int("num_vertical_samples", &uniform_num_vertical_samples);
+	register_uniform_int("vertical_int_radius", &uniform_vertical_int_radius);
+	register_uniform_float("inv_vertical_scaling_factor", &uniform_inv_vertical_scaling_factor);
+	register_uniform_int("output_samples_per_block", &uniform_output_samples_per_block);
+	register_uniform_int("num_horizontal_filters", &uniform_num_horizontal_filters);
+	register_uniform_int("num_vertical_filters", &uniform_num_vertical_filters);
+	register_uniform_float("slice_height", &uniform_slice_height);
+	register_uniform_float("horizontal_whole_pixel_offset", &uniform_horizontal_whole_pixel_offset);
+	register_uniform_int("vertical_whole_pixel_offset", &uniform_vertical_whole_pixel_offset);
+	register_uniform_float("inv_input_height", &uniform_inv_input_height);
+	register_uniform_float("input_texcoord_y_adjust", &uniform_input_texcoord_y_adjust);
+
+	call_once(lanczos_table_init_done, init_lanczos_table);
+}
+
+ResampleComputeEffect::~ResampleComputeEffect()
+{
+}
+
+string ResampleComputeEffect::output_fragment_shader()
+{
+	char buf[256] = "";
+	return buf + read_file("resample_effect.comp");
+}
+
+// The compute shader does horizontal scaling first, using exactly the same
+// two-component texture format as in the two-pass version (see the comments
+// on ResampleComputeEffect). The vertical scaling calculates the offset values
+// in the shader, so we only store a one-component texture with the weights
+// for each filter.
+void ResampleComputeEffect::update_texture(GLuint glsl_program_num, const string &prefix, unsigned *sampler_num)
+{
+	ScalingWeights horiz_weights = calculate_bilinear_scaling_weights(input_width, output_width, zoom_x, offset_x, BilinearFormatConstraints::ALLOW_FP32_ONLY);
+	ScalingWeights vert_weights = calculate_raw_scaling_weights(input_height, output_height, zoom_y, offset_y);
+	uniform_vertical_int_radius = vert_weights.int_radius;
+	vertical_scaling_factor = vert_weights.scaling_factor;
+	uniform_inv_vertical_scaling_factor = 1.0f / vert_weights.scaling_factor;
+	src_horizontal_bilinear_samples = horiz_weights.src_bilinear_samples;
+	src_vertical_samples = vert_weights.src_bilinear_samples;
+	uniform_num_horizontal_filters = horiz_weights.dst_samples;
+	uniform_num_vertical_filters = vert_weights.dst_samples;
+	slice_height = 1.0f / horiz_weights.num_loops;
+
+	// Encode as a two-component texture. Note the GL_REPEAT.
+	glActiveTexture(GL_TEXTURE0 + *sampler_num);
+	check_error();
+	glBindTexture(GL_TEXTURE_2D, tex_horiz.get_texnum());
+	check_error();
+
+	tex_horiz.update(horiz_weights.src_bilinear_samples, horiz_weights.dst_samples, GL_RG32F, GL_RG, GL_FLOAT, horiz_weights.bilinear_weights_fp32.get());
+
+	glActiveTexture(GL_TEXTURE0 + *sampler_num + 1);
+	check_error();
+	glBindTexture(GL_TEXTURE_2D, tex_vert.get_texnum());
+	check_error();
+
+	// Storing the vertical weights as fp16 instead of fp32 saves a few
+	// percent on NVIDIA, and it doesn't seem to hurt quality any.
+	// (The horizontal weights is a different story, since the offsets
+	// can get large and are fairly accuracy-sensitive. Also, they are
+	// loaded only once per workgroup, at the very beginning.)
+	tex_vert.update(vert_weights.src_bilinear_samples, vert_weights.dst_samples, GL_R16F, GL_RED, GL_HALF_FLOAT, vert_weights.raw_weights.get());
+
+	// Figure out how many output samples each compute shader block is going to output.
+	int usable_input_samples_per_block = 128 - 2 * uniform_vertical_int_radius;
+	int output_samples_per_block = int(floor(usable_input_samples_per_block * vertical_scaling_factor));
+	if (output_samples_per_block < 1) {
+		output_samples_per_block = 1;
+	}
+	uniform_output_samples_per_block = output_samples_per_block;
 }
 
 namespace {
@@ -632,15 +772,18 @@ ScalingWeights calculate_scaling_weights(unsigned src_size, unsigned dst_size, f
 	ScalingWeights ret;
 	ret.src_bilinear_samples = src_samples;
 	ret.dst_samples = dst_samples;
+	ret.int_radius = int_radius;
+	ret.scaling_factor = scaling_factor;
 	ret.num_loops = num_loops;
 	ret.bilinear_weights_fp16 = nullptr;
 	ret.bilinear_weights_fp32 = move(weights);
+	ret.raw_weights = nullptr;
 	return ret;
 }
 
 }  // namespace
 
-ScalingWeights calculate_bilinear_scaling_weights(unsigned src_size, unsigned dst_size, float zoom, float offset)
+ScalingWeights calculate_bilinear_scaling_weights(unsigned src_size, unsigned dst_size, float zoom, float offset, BilinearFormatConstraints constraints)
 {
 	ScalingWeights ret = calculate_scaling_weights(src_size, dst_size, zoom, offset);
 	unique_ptr<Tap<float>[]> weights = move(ret.bilinear_weights_fp32);
@@ -652,17 +795,23 @@ ScalingWeights calculate_bilinear_scaling_weights(unsigned src_size, unsigned ds
 	// samples, since one would assume overall errors in the shape don't matter as much.
 	const float max_error = 2.0f / (255.0f * 255.0f);
 	unique_ptr<Tap<fp16_int_t>[]> bilinear_weights_fp16;
-	int src_bilinear_samples = combine_many_samples(weights.get(), src_size, src_samples, ret.dst_samples, &bilinear_weights_fp16);
-	unique_ptr<Tap<float>[]> bilinear_weights_fp32 = nullptr;
+	unique_ptr<Tap<float>[]> bilinear_weights_fp32;
 	double max_sum_sq_error_fp16 = 0.0;
-	for (unsigned y = 0; y < ret.dst_samples; ++y) {
-		double sum_sq_error_fp16 = compute_sum_sq_error(
-			weights.get() + y * src_samples, src_samples,
-			bilinear_weights_fp16.get() + y * src_bilinear_samples, src_bilinear_samples,
-			src_size);
-		max_sum_sq_error_fp16 = std::max(max_sum_sq_error_fp16, sum_sq_error_fp16);
-		if (max_sum_sq_error_fp16 > max_error) {
-			break;
+	int src_bilinear_samples;
+	if (constraints == BilinearFormatConstraints::ALLOW_FP32_ONLY) {
+		max_sum_sq_error_fp16 = numeric_limits<double>::max();
+	} else {
+		assert(constraints == BilinearFormatConstraints::ALLOW_FP16_AND_FP32);
+		src_bilinear_samples = combine_many_samples(weights.get(), src_size, src_samples, ret.dst_samples, &bilinear_weights_fp16);
+		for (unsigned y = 0; y < ret.dst_samples; ++y) {
+			double sum_sq_error_fp16 = compute_sum_sq_error(
+				weights.get() + y * src_samples, src_samples,
+				bilinear_weights_fp16.get() + y * src_bilinear_samples, src_bilinear_samples,
+				src_size);
+			max_sum_sq_error_fp16 = std::max(max_sum_sq_error_fp16, sum_sq_error_fp16);
+			if (max_sum_sq_error_fp16 > max_error) {
+				break;
+			}
 		}
 	}
 
@@ -674,6 +823,28 @@ ScalingWeights calculate_bilinear_scaling_weights(unsigned src_size, unsigned ds
 	ret.src_bilinear_samples = src_bilinear_samples;
 	ret.bilinear_weights_fp16 = move(bilinear_weights_fp16);
 	ret.bilinear_weights_fp32 = move(bilinear_weights_fp32);
+	return ret;
+}
+
+// Unlike calculate_bilinear_scaling_weights(), this just converts the weights,
+// without any combining trickery. Thus, it is also much faster.
+ScalingWeights calculate_raw_scaling_weights(unsigned src_size, unsigned dst_size, float zoom, float offset)
+{
+	ScalingWeights ret = calculate_scaling_weights(src_size, dst_size, zoom, offset);
+	unique_ptr<Tap<float>[]> weights = move(ret.bilinear_weights_fp32);
+	const int src_samples = ret.src_bilinear_samples;
+
+	// Convert to fp16 (without any positions, as they are calculated implicitly
+	// by the compute shader) and normalize.
+	unique_ptr<fp16_int_t[]> raw_weights(new fp16_int_t[ret.dst_samples * src_samples]);
+	for (unsigned y = 0; y < ret.dst_samples; ++y) {
+		for (int i = 0; i < src_samples; ++i) {
+			raw_weights[y * src_samples + i] = fp32_to_fp16(weights[y * src_samples + i].weight);
+		}
+		normalize_sum(raw_weights.get() + y * src_samples, src_samples);
+	}
+
+	ret.raw_weights = move(raw_weights);
 	return ret;
 }
 
@@ -761,6 +932,67 @@ void Support2DTexture::update(GLint width, GLint height, GLenum internal_format,
 		last_texture_height = height;
 		last_texture_internal_format = internal_format;
 	}
+}
+
+void ResampleComputeEffect::get_compute_dimensions(unsigned output_width, unsigned output_height,
+                                                   unsigned *x, unsigned *y, unsigned *z) const
+{
+	*x = output_width;
+	*y = (output_height + uniform_output_samples_per_block - 1) / uniform_output_samples_per_block;
+	*z = 1;
+}
+
+void ResampleComputeEffect::set_gl_state(GLuint glsl_program_num, const string &prefix, unsigned *sampler_num)
+{
+	Effect::set_gl_state(glsl_program_num, prefix, sampler_num);
+
+	assert(input_width > 0);
+	assert(input_height > 0);
+	assert(output_width > 0);
+	assert(output_height > 0);
+
+	if (input_width != last_input_width ||
+	    input_height != last_input_height ||
+	    output_width != last_output_width ||
+	    output_height != last_output_height ||
+	    offset_x != last_offset_x ||
+	    offset_y != last_offset_y ||
+	    zoom_x != last_zoom_x ||
+	    zoom_x != last_zoom_y) {
+		update_texture(glsl_program_num, prefix, sampler_num);
+		last_input_width = input_width;
+		last_input_height = input_height;
+		last_output_width = output_width;
+		last_output_height = output_height;
+		last_offset_x = offset_x;
+		last_offset_y = offset_y;
+		last_zoom_x = zoom_x;
+		last_zoom_y = zoom_y;
+	}
+
+	glActiveTexture(GL_TEXTURE0 + *sampler_num);
+	check_error();
+	glBindTexture(GL_TEXTURE_2D, tex_horiz.get_texnum());
+	check_error();
+	uniform_sample_tex_horizontal = *sampler_num;
+	++*sampler_num;
+
+	glActiveTexture(GL_TEXTURE0 + *sampler_num);
+	check_error();
+	glBindTexture(GL_TEXTURE_2D, tex_vert.get_texnum());
+	check_error();
+	uniform_sample_tex_vertical = *sampler_num;
+	++*sampler_num;
+
+	uniform_num_horizontal_samples = src_horizontal_bilinear_samples;
+	uniform_num_vertical_samples = src_vertical_samples;
+	uniform_slice_height = slice_height;
+
+	uniform_horizontal_whole_pixel_offset = lrintf(offset_x) / float(input_width);
+	uniform_vertical_whole_pixel_offset = lrintf(offset_y);
+
+	uniform_inv_input_height = 1.0f / float(input_height);
+	uniform_input_texcoord_y_adjust = 0.5f / float(input_height);
 }
 
 }  // namespace movit

@@ -1,0 +1,178 @@
+// Implicit uniforms:
+// uniform sampler2D PREFIX(sample_tex_horizontal);
+// uniform sampler2D PREFIX(sample_tex_vertical);
+// uniform int PREFIX(output_width);
+// uniform int PREFIX(output_height);
+// uniform int PREFIX(num_horizontal_samples);
+// uniform int PREFIX(num_vertical_samples);
+// uniform int PREFIX(vertical_int_radius);
+// uniform int PREFIX(num_horizontal_filters);
+// uniform int PREFIX(num_vertical_filters);
+// uniform int PREFIX(vertical_whole_pixel_offset);
+// uniform float PREFIX(inv_vertical_scaling_factor);
+// uniform float PREFIX(slice_height);
+// uniform float PREFIX(horizontal_whole_pixel_offset);
+// uniform float PREFIX(inv_input_height);
+// uniform float PREFIX(input_texcoord_y_adjust);
+
+// Number of samples we have room for between the stages. If this gets
+// higher, we will have bigger but fewer blocks, which has a few pros and cons:
+//
+//  + More inter-block parallelity (too low means you cannot fill a warp)
+//  + Less pixels being wasted to overlap (less work being done overall)
+//  - More risk of overflowing the L1 cache
+//  - Less overall GPU parallelity (too few blocks means some GPU cores will
+//    not have a block to work on)
+//
+// The current value is a tradeoff; some source/destination sizes will
+// benefit from different values.
+#define NUM_TEMP_SAMPLES 128
+
+// Number of horizontal resampling coefficients (sample positions and
+// weight) we store in shared memory; generally, as long as we have less
+// than 25x downscaling or so, this will be enough.
+#define NUM_STORED_HORIZONTAL_COEFFS 128
+
+// Packing the intermediate results into fp16 saves a bit of shared memory,
+// but more importantly, seems to reduce the number of bank conflicts
+// (stalls when multiple members of a warp try to access the same bank
+// at the same time, where bank = address & 0x3c). The actual effect will
+// naturally depend a lot of the scaling factor, but we're talking about
+// 5–15% improvement for NVIDIA in our microbenchmarks (although some are
+// neutral and occasionally one might even be negative). Intel appears to be
+// less sensitive, although that might be because more time overall goes
+// towards the texture sampling.
+//
+// NVIDIA has an extension GL_NV_gpu_shader5 that gives native half types,
+// but it doesn't buy us any speed, just less ugly syntax for packing/unpacking.
+#ifdef GL_ARB_shading_language_packing
+#define PACK_HALF 1
+#else
+#define PACK_HALF 0
+#endif
+
+// In theory, these could conflict with another effect since we don't use
+// PREFIX(), but there can only be one instance of each compute shader,
+// and having PREFIX() everywhere on non-uniforms becomes increasingly unreadable.
+
+shared vec2 horizontal_coeffs[NUM_STORED_HORIZONTAL_COEFFS];
+#if PACK_HALF
+shared uvec2 column[NUM_TEMP_SAMPLES];  // this is more fixed-ish, see below
+#else
+shared vec4 column[NUM_TEMP_SAMPLES];  // this is more fixed-ish, see below
+#endif
+
+layout(local_size_x = 1, local_size_y = NUM_TEMP_SAMPLES) in;
+
+// Find out where the C++ code placed the center of the filter (this is exactly the same calculation,
+// just with whole_pixel_offset added in).
+int center_input_from_output(uint output_y)
+{
+	return int(roundEven((output_y + 0.5f) * PREFIX(inv_vertical_scaling_factor) - 0.5f)) + PREFIX(vertical_whole_pixel_offset);
+}
+
+float normalized_input_y(int min_input_y, int invocation_index)
+{
+	return (min_input_y + invocation_index) * PREFIX(inv_input_height) + PREFIX(input_texcoord_y_adjust);
+}
+
+vec2 get_horizontal_coeff(int x)
+{
+	ivec2 sample_tc;
+	sample_tc.x = x;
+	sample_tc.y = int(gl_GlobalInvocationID.x) % PREFIX(num_horizontal_filters);
+	vec2 s = texelFetch(PREFIX(sample_tex_horizontal), sample_tc, 0).rg;
+	s.g += ((int(gl_GlobalInvocationID.x) / PREFIX(num_horizontal_filters)) * PREFIX(slice_height) + PREFIX(horizontal_whole_pixel_offset));
+	return s;
+}
+
+vec4 do_horizontal_sampling(float input_y)
+{
+	vec4 sum = vec4(0.0);
+	if (PREFIX(num_horizontal_samples) <= NUM_STORED_HORIZONTAL_COEFFS) {
+		for (int i = 0; i < PREFIX(num_horizontal_samples); ++i) {
+			vec2 s = horizontal_coeffs[i];
+			sum += INPUT(vec2(s.y, input_y)) * s.x;
+		}
+	} else {
+		// Not enough shared memory available to hold the horizontal resampling coefficients,
+		// so load the remaining ones as we go. This is generally somewhat slower, even though
+		// all elements of the warp will be loading the same texture sample, so it definitely
+		// a slow path that we will only see in extreme downsampling (which is, unfortunately,
+		// the case that's the most hurt by loading coefficients on-the-fly).
+		//
+		// Other strategies would be possible, including loading coefficients in
+		// multiple phases (or skipping the shared memory altogether if there's no room),
+		// but this is the simplest and not too slow.
+		for (int i = 0; i < NUM_STORED_HORIZONTAL_COEFFS; ++i) {
+			vec2 s = horizontal_coeffs[i];
+			sum += INPUT(vec2(s.y, input_y)) * s.x;
+		}
+		for (int i = NUM_STORED_HORIZONTAL_COEFFS; i < PREFIX(num_horizontal_samples); ++i) {
+			vec2 s = get_horizontal_coeff(i);
+			sum += INPUT(vec2(s.y, input_y)) * s.x;
+		}
+	}
+	return sum;
+}
+
+void FUNCNAME() {
+	// This is a bit tricky: The x and y workgroup IDs are in the _output_ texture,
+	// but when doing horizontal sampling, the local y invocation ID is in the _input_
+	// texture.
+	uint min_output_y = uint(PREFIX(output_samples_per_block) * int(gl_WorkGroupID.y));
+	uint max_output_y = min(min_output_y + uint(PREFIX(output_samples_per_block)), uint(PREFIX(output_size).y));  // Exclusive.
+
+	int min_input_y = center_input_from_output(min_output_y) - PREFIX(vertical_int_radius);
+	int max_input_y = center_input_from_output(max_output_y - 1u) + PREFIX(vertical_int_radius);  // Inclusive.
+
+	// Load coefficients for the horizontal resampling.
+	if (gl_LocalInvocationID.y < uint(PREFIX(num_horizontal_samples))) {
+		horizontal_coeffs[gl_LocalInvocationID.y] = get_horizontal_coeff(int(gl_LocalInvocationID.y));
+	}
+
+	memoryBarrier();
+	barrier();
+
+	// Do the actual horizontal sampling for this row.
+	if (min_input_y + int(gl_LocalInvocationID.y) <= max_input_y) {
+		float input_y = normalized_input_y(min_input_y, int(gl_LocalInvocationID.y));
+		vec4 val = do_horizontal_sampling(input_y);
+#if PACK_HALF
+		column[gl_LocalInvocationID.y] = uvec2(packHalf2x16(val.xy), packHalf2x16(val.zw));
+#else
+		column[gl_LocalInvocationID.y] = val;
+#endif
+	}
+
+	memoryBarrier();
+	barrier();
+
+	// Vertical resampling. For downscaling, we'll only have one iteration
+	// through this loop, but for upscaling, we may have several.
+	//
+	// FIXME: if NUM_TEMP_SAMPLES is too small, we need yet more stuff
+	for (uint output_y = min_output_y + gl_LocalInvocationID.y; output_y < max_output_y; output_y += uint(NUM_TEMP_SAMPLES)) {
+		int base_idx = center_input_from_output(output_y) - PREFIX(vertical_int_radius) - min_input_y;
+		int sample_y = int(output_y) % PREFIX(num_vertical_filters);
+
+		vec4 sum = vec4(0.0);
+		for (int i = 0; i < PREFIX(num_vertical_samples); ++i) {
+			float weight = texelFetch(PREFIX(sample_tex_vertical), ivec2(i, sample_y), 0).r;
+#if PACK_HALF
+			uvec2 packed_val = column[base_idx + i];
+			vec4 val;
+			val.xy = unpackHalf2x16(packed_val.x);
+			val.zw = unpackHalf2x16(packed_val.y);
+			sum += val * weight;
+#else
+			sum += column[base_idx + i] * weight;
+#endif
+		}
+		OUTPUT(uvec2(gl_GlobalInvocationID.x, output_y), sum);
+	}
+}
+
+#undef PACK_HALF
+#undef NUM_TEMP_SAMPLES
+#undef NUM_STORED_HORIZONTAL_COEFFS
