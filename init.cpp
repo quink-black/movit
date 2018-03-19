@@ -283,23 +283,24 @@ void measure_roundoff_problems()
 
 bool check_extensions()
 {
+	const int version = epoxy_gl_version();
 	// GLES generally doesn't use extensions as actively as desktop OpenGL.
 	// For now, we say that for GLES, we require GLES 3, which has everything
 	// we need.
 	if (!epoxy_is_desktop_gl()) {
-		if (epoxy_gl_version() >= 30) {
+		if (version >= 30) {
 			return true;
 		} else {
 			fprintf(stderr, "Movit system requirements: GLES version %.1f is too old (GLES 3.0 needed).\n",
-				0.1f * epoxy_gl_version());
+				0.1f * version);
 			fprintf(stderr, "Movit initialization failed.\n");
 			return false;
 		}
 	}
 
-	if (epoxy_gl_version() < 30) {
+	if (version < 30) {
 		fprintf(stderr, "Movit system requirements: OpenGL version %.1f is too old (OpenGL 3.0 needed).\n",
-			0.1f * epoxy_gl_version());
+			0.1f * version);
 		fprintf(stderr, "Movit initialization failed.\n");
 		return false;
 	}
@@ -308,7 +309,7 @@ bool check_extensions()
 	// phase in an effect chain. However, that depends on this extension;
 	// without it, we do cannot even create the query objects.
 	movit_timer_queries_supported =
-		(epoxy_gl_version() >= 33 || epoxy_has_gl_extension("GL_ARB_timer_query"));
+		(version >= 33 || epoxy_has_gl_extension("GL_ARB_timer_query"));
 
 	// Certain effects have compute shader implementations, which may be
 	// more efficient than the normal fragment shader versions.
@@ -316,7 +317,7 @@ bool check_extensions()
 	// so we require desktop OpenGL.
 	movit_compute_shaders_supported =
 		(epoxy_is_desktop_gl() &&
-		 (epoxy_gl_version() >= 43 ||
+		 (version >= 43 ||
 		  (epoxy_has_gl_extension("GL_ARB_compute_shader") &&
 		   epoxy_has_gl_extension("GL_ARB_shader_image_load_store") &&
 	           epoxy_has_gl_extension("GL_ARB_shader_image_size"))));
@@ -404,12 +405,13 @@ bool init_movit(const string& data_directory, MovitDebugLevel debug_level)
 	// Find out what shader model we should compile for.
 	// We need at least 1.30, due to use of (among others) integers.
 	if (epoxy_is_desktop_gl()) {
-		if (get_glsl_version() < 1.30f) {
+		const double glsl_version = get_glsl_version();
+		if (glsl_version < 1.30f) {
 			fprintf(stderr, "Movit system requirements: Needs at least GLSL version 1.30 (has version %.1f)\n",
-				get_glsl_version());
+				glsl_version);
 			return false;
 		}
-		if (get_glsl_version() < 1.50f) {
+		if (glsl_version < 1.50f) {
 			movit_shader_model = MOVIT_GLSL_130;
 		} else {
 			// Note: All of our 1.50 shaders are identical to our 1.30 shaders,
