@@ -14,15 +14,14 @@
 #include <SDL2/SDL_video.h>
 
 #include <assert.h>
-#include <features.h>
 #include <math.h>
 #include <png.h>
 #include <pngconf.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/time.h>
-#include <time.h>
+
+#include <chrono>
 
 #include "diffusion_effect.h"
 #include "effect.h"
@@ -229,13 +228,8 @@ int main(int argc, char **argv)
 
 	int frame = 0;
 	bool screenshot = false;
-#if _POSIX_C_SOURCE >= 199309L
-	struct timespec start, now;
-	clock_gettime(CLOCK_MONOTONIC, &start);
-#else
-	struct timeval start, now;
-	gettimeofday(&start, nullptr);
-#endif
+
+	auto start = std::chrono::steady_clock::now();
 
 	while (!quit) {
 		SDL_Event event;
@@ -304,18 +298,13 @@ int main(int argc, char **argv)
 		check_error();
 
 #if 1
-#if _POSIX_C_SOURCE >= 199309L
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		double elapsed = now.tv_sec - start.tv_sec +
-			1e-9 * (now.tv_nsec - start.tv_nsec);
-#else
-		gettimeofday(&now, nullptr);
-		double elapsed = now.tv_sec - start.tv_sec +
-			1e-6 * (now.tv_usec - start.tv_usec);
-#endif
-		printf("%d frames in %.3f seconds = %.1f fps (%.1f ms/frame)\n",
-			frame, elapsed, frame / elapsed,
-			1e3 * elapsed / frame);
+		auto now = std::chrono::steady_clock::now();
+		double elapsed = std::chrono::duration<double>(now - start).count();
+		if (elapsed != 0.0) {
+			printf("%d frames in %.3f seconds = %.1f fps (%.1f ms/frame)\n",
+				frame, elapsed, frame / elapsed,
+				1e3 * elapsed / frame);
+		}
 
 		// Reset every 100 frames, so that local variations in frame times
 		// (especially for the first few frames, when the shaders are
