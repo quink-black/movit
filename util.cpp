@@ -26,8 +26,6 @@ using namespace std;
 
 namespace movit {
 
-extern string *movit_data_directory;
-
 void hsv2rgb(float h, float s, float v, float *r, float *g, float *b)
 {
 	if (h < 0.0f) {
@@ -86,7 +84,7 @@ void hsv2rgb_normalized(float h, float s, float v, float *r, float *g, float *b)
 
 string read_file(const string &filename)
 {
-	const string full_pathname = *movit_data_directory + "/" + filename;
+	const string full_pathname = movit_data_directory() + "/" + filename;
 
 	FILE *fp = fopen(full_pathname.c_str(), "r");
 	if (fp == nullptr) {

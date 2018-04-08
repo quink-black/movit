@@ -19,11 +19,6 @@ bool movit_timer_queries_supported, movit_compute_shaders_supported;
 int movit_num_wrongly_rounded;
 MovitShaderModel movit_shader_model;
 
-// The rules for objects with nontrivial constructors in static scope
-// are somewhat convoluted, and easy to mess up. We simply have a
-// pointer instead (and never care to clean it up).
-string *movit_data_directory = nullptr;
-
 namespace {
 
 void measure_texel_subpixel_precision()
@@ -378,13 +373,31 @@ void APIENTRY debug_callback(GLenum source,
 
 }  // namespace
 
+static string update_movit_data_directory(const string& data_directory)
+{
+	static string movit_data_directory_;
+
+	if (data_directory.empty()) {
+		return movit_data_directory_;
+	} else {
+		string old_directory = movit_data_directory_;
+		movit_data_directory_ = data_directory;
+		return old_directory;
+	}
+}
+
+string movit_data_directory()
+{
+	return update_movit_data_directory(string());
+}
+
 bool init_movit(const string& data_directory, MovitDebugLevel debug_level)
 {
 	if (movit_initialized) {
 		return true;
 	}
 
-	movit_data_directory = new string(data_directory);
+	update_movit_data_directory(data_directory);
 	movit_debug_level = debug_level;
 
 	// geez	

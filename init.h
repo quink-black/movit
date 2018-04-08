@@ -27,6 +27,8 @@ enum MovitDebugLevel {
 // only the first will count, and the second will always return true.
 bool init_movit(const std::string& data_directory, MovitDebugLevel debug_level) MUST_CHECK_RESULT;
 
+std::string movit_data_directory();
+
 // GPU features. These are not intended for end-user use.
 
 // Whether init_movit() has been called.
